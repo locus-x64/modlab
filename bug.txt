@@ -1,0 +1,35 @@
+[ 2588.774406] ------------[ cut here ]------------
+[ 2588.774416] UBSAN: array-index-out-of-bounds in /tmp/vbox.0/VBoxGuestR0LibHGCMInternal.c:643:46
+[ 2588.774428] index 1 is out of range for type 'RTGCPHYS64 [1]'
+[ 2588.774435] CPU: 8 PID: 2174 Comm: VBoxClient Tainted: G        W  OE      6.8.0-40-generic #40~22.04.3-Ubuntu
+[ 2588.774441] Hardware name: innotek GmbH VirtualBox/VirtualBox, BIOS VirtualBox 12/01/2006
+[ 2588.774445] Call Trace:
+[ 2588.774449]  <TASK>
+[ 2588.774455]  dump_stack_lvl+0x76/0xa0
+[ 2588.774472]  dump_stack+0x10/0x20
+[ 2588.774479]  __ubsan_handle_out_of_bounds+0xc6/0x110
+[ 2588.774486]  VbglR0HGCMInternalCall+0x173d/0x1ad0 [vboxguest]
+[ 2588.774566]  ? __pfx_vgdrvHgcmAsyncWaitCallbackInterruptible+0x10/0x10 [vboxguest]
+[ 2588.774627]  vgdrvIoCtl_HGCMCallInner.constprop.0+0x158/0x2e0 [vboxguest]
+[ 2588.774681]  ? _raw_spin_unlock+0xe/0x40
+[ 2588.774690]  VGDrvCommonIoCtl+0x5fb/0x1cd0 [vboxguest]
+[ 2588.774746]  ? __check_object_size.part.0+0x72/0x150
+[ 2588.774754]  ? _copy_from_user+0x2f/0x80
+[ 2588.774760]  vgdrvLinuxIOCtl+0x109/0x290 [vboxguest]
+[ 2588.774815]  __x64_sys_ioctl+0xa3/0xf0
+[ 2588.774823]  x64_sys_call+0xa68/0x24b0
+[ 2588.774829]  do_syscall_64+0x81/0x170
+[ 2588.774836]  ? irqentry_exit_to_user_mode+0x7e/0x260
+[ 2588.774844]  ? irqentry_exit+0x43/0x50
+[ 2588.774850]  ? exc_page_fault+0x94/0x1b0
+[ 2588.774856]  entry_SYSCALL_64_after_hwframe+0x78/0x80
+[ 2588.774864] RIP: 0033:0x7141bc51a94f
+[ 2588.774880] Code: 00 48 89 44 24 18 31 c0 48 8d 44 24 60 c7 04 24 10 00 00 00 48 89 44 24 08 48 8d 44 24 20 48 89 44 24 10 b8 10 00 00 00 0f 05 <41> 89 c0 3d 00 f0 ff ff 77 1f 48 8b 44 24 18 64 48 2b 04 25 28 00
+[ 2588.774885] RSP: 002b:00007141bc268530 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+[ 2588.774892] RAX: ffffffffffffffda RBX: 00007141bc2685c0 RCX: 00007141bc51a94f
+[ 2588.774895] RDX: 00007141bc2685c0 RSI: 00000000c0585607 RDI: 0000000000000003
+[ 2588.774898] RBP: 00007141bc268590 R08: 00007141bc268664 R09: 00007141a802b5f0
+[ 2588.774901] R10: 00007141a802c000 R11: 0000000000000246 R12: 00007141bc268664
+[ 2588.774904] R13: 000000000059f060 R14: 0000000000000001 R15: 00007141bc268664
+[ 2588.774909]  </TASK>
+[ 2588.774912] ---[ end trace ]---
