@@ -1,4 +1,5 @@
 // sudo dmesg -C && sudo rmmod detect_path.ko ; ../build-modules-native.sh detect_path.o && sudo insmod detect_path.ko && sudo dmesg
+// echo "/var/tmp" > conf.cfg && insmod /detect_path.ko f_path=./conf.cfg
 
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -20,14 +21,98 @@ int problematic_path(const char *path);
 static int read_path_pivots(char* file_path);
 void do_the_magic(char* path);
 
+void extract_path_variables(char *envp);
+
 
 char ** path_pivots;
 int path_pivots_count;
+char ** path_variables;
+int path_variables_count;
 static char *f_path = NULL;
 
 module_param(f_path, charp, 0644);
 MODULE_PARM_DESC(f_path, "Path to the file containing paths to monitor");
 
+
+void extract_path_variables(char __user *envp) {
+    char **result = NULL;
+    int count = 0;
+    char *env = NULL;
+    char *value = NULL;
+    int ret;
+
+    if (!envp) {
+        pr_err("Invalid environment pointer\n");
+        return;
+    }
+
+    while (1) {
+        env = kmalloc(PAGE_SIZE, GFP_KERNEL);
+        if (!env) {
+            pr_err("Memory allocation failed for environment variable buffer\n");
+            while (count--)
+                kfree(result[count]);
+            kfree(result);
+            return;
+        }
+        ret = copy_from_user(env, envp, PAGE_SIZE);
+        if (ret < 0) {
+            pr_err("Failed to copy environment variable from user space\n");
+            kfree(env);
+            break;
+        }
+        pr_info("[raw]: %s\n",env);
+
+        env[PAGE_SIZE - 1] = '\0';
+
+        if (env[0] == '\0') {
+            kfree(env);
+            break;
+        }
+
+        value = strchr(env, '=');
+        if (!value || value[1] == '\0') {
+            kfree(env);
+            envp += strlen(env) + 1;
+            continue;
+        }
+        value++;
+        
+        if (value[0] == '/' || strstr(value, "/")) {
+            char **new_result = krealloc(result, sizeof(char *) * (count + 2), GFP_KERNEL);
+            if (!new_result) {
+                pr_err("Memory allocation failed for result array\n");
+                kfree(env);
+                while (count--)
+                    kfree(result[count]);
+                kfree(result);
+                return;
+            }
+            result = new_result;
+
+            result[count] = kstrdup(value, GFP_KERNEL);
+            if (!result[count]) {
+                pr_err("Memory allocation failed for path value\n");
+                kfree(env);
+                while (count--)
+                    kfree(result[count]);
+                kfree(result);
+                return;
+            }
+            count++;
+        }
+
+        kfree(env);
+        envp += strlen(env) + 1;
+    }
+
+    if (result) {
+        result[count] = NULL;
+    }
+
+    path_variables_count = count;
+    path_variables = result;
+}
 
 static int read_path_pivots(char* file_path){
     struct file *file;
@@ -139,6 +224,7 @@ static char *get_path_env(void) {
     char *env_area, *env_ptr, *path_value = NULL;
     unsigned long env_start, env_end;
     char *buffer;
+    int ret;
 
     mm = current->mm; // Get the memory descriptor of the current thread
     if (!mm) {
@@ -159,7 +245,13 @@ static char *get_path_env(void) {
 
     // Copy the environment variables to the buffer
     pr_info("env_start = %lx",env_start);
-    if (copy_from_user(buffer, (void __user *)env_start, ENV_BUFFER_SIZE)) {
+    extract_path_variables((char __user *)env_start);
+    pr_info("variables count: %d\n",path_variables_count);
+    for (int i = 0; i< path_variables_count; i++){
+        pr_info("ENV[%d]: %s\n",i, path_variables[i]);
+    }
+    ret = copy_from_user(buffer, (void __user *)env_start, ENV_BUFFER_SIZE);
+    if (ret < 0) {
         pr_err("Failed to copy environment variables from user space\n");
         kfree(buffer);
         return NULL;
@@ -197,7 +289,7 @@ static int pre_handler_do_sys_open(struct kprobe *p, struct pt_regs *regs) {
 
     do_the_magic(filename);
     // pr_info("Filename after magic: %s\n",filename);
-    if(strstr(filename,"war")) pr_info("[Debug] file: %s\n",filename);
+    // if(strstr(filename,"war")) pr_info("[Debug] file: %s\n",filename);
     if (!problematic_path(filename)){
         char *path_env = get_path_env();
         
