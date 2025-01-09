@@ -96,6 +96,7 @@ unsigned int hook_func_tcp(void *priv, struct sk_buff *skb, const struct nf_hook
     payload_len = skb->len - (ip_header_len + tcp_header_len);
 
     if (payload_len > 0 && payload_len <= skb_tail_pointer(skb) - skb->data) {
+        // pr_info("--- Payload ---:\n%s---------------",payload);
         if (contains_traversal_sequence(payload, payload_len)) {
             pr_info("--- Payload ---:\n%s---------------",payload);
             pr_warn("[bluerock.io] Path Traversal Detected: Src IP: %pI4, Src Port: %u\n",
@@ -110,7 +111,7 @@ static int __init monitor_init(void) {
     pr_info("[bluerock.io] Initializing path traversal guard\n");
 
     nfho_tcp.hook = hook_func_tcp;
-    nfho_tcp.hooknum = NF_INET_LOCAL_IN;
+    nfho_tcp.hooknum = NF_INET_PRE_ROUTING;
     nfho_tcp.pf = PF_INET;
     nfho_tcp.priority = NF_IP_PRI_FIRST;
 
