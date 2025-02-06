@@ -1,5 +1,6 @@
 {
     "files.associations": {
         "module.h": "c"
-    }
+    },
+    "makefile.configureOnOpen": true
 }

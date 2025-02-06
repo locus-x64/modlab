@@ -1,6 +1,4 @@
-// sudo dmesg -C && sudo rmmod detect_path.ko ; ../build-modules-native.sh detect_path.o && sudo insmod detect_path.ko && sudo dmesg
-// echo "/var/tmp" > conf.cfg && insmod /detect_path.ko f_path=./conf.cfg
-
+#include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/module.h>
@@ -8,14 +6,35 @@
 #include <linux/string.h>
 #include <linux/kprobes.h>
 #include <linux/uaccess.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/security.h>
+#include <linux/kprobes.h>
+#include <linux/fdtable.h>
+#include <linux/net.h>
+#include <net/inet_sock.h>
+#include <linux/version.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("raza.mumtaz@ebryx.com");
+MODULE_DESCRIPTION("File System Monitoring Module");
+MODULE_SOFTDEP("pre: netfilter_monitor");
+
 
 
 #define ENV_BUFFER_SIZE 4096
 #define BUF_SIZE 512
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("raza.mumtaz@ebryx.com");
-MODULE_DESCRIPTION("Path Traversal Detection");
+extern struct list_head captured_ports;
+extern spinlock_t ports_lock;
+
+struct port_entry {
+    u16 port;
+    atomic_t refcount;
+    struct list_head list;
+};
+
 
 int problematic_path(const char *path);
 static int read_path_pivots(char* file_path);
@@ -33,6 +52,105 @@ static char *f_path = NULL;
 module_param(f_path, charp, 0644);
 MODULE_PARM_DESC(f_path, "Path to the file containing paths to monitor");
 
+static bool port_in_list(u16 port, struct list_head *ports_list)
+{
+    struct port_entry *entry;
+    
+    list_for_each_entry(entry, ports_list, list) {
+        if (entry->port == port)
+            return true;
+    }
+    return false;
+}
+static struct list_head *get_process_ports(struct task_struct *task){
+    struct files_struct *files;
+    struct fdtable *fdt;
+    int i;
+    struct list_head *ports_list;
+    
+    // Allocate the list head
+    ports_list = kmalloc(sizeof(*ports_list), GFP_KERNEL);
+    if (!ports_list)
+        return NULL;
+    INIT_LIST_HEAD(ports_list);
+
+    files = task->files;
+    if (!files) {
+        kfree(ports_list);
+        return NULL;
+    }
+    rcu_read_lock();
+    fdt = files_fdtable(files);
+    for (i = 0; i < fdt->max_fds; i++) {
+        struct file *file;
+        #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
+            file = fdt->fd[i];
+        #else
+            file = fcheck_files(files, i);
+        #endif
+        if (!file)
+            continue;
+
+        if (S_ISSOCK(file_inode(file)->i_mode)) {
+            struct socket *sock = file->private_data;
+            struct sock *sk = sock->sk;
+
+            if (sk->sk_family == AF_INET || sk->sk_family == AF_INET6) {
+                if ((sk->sk_state == TCP_LISTEN) || 
+                    (sk->sk_family == AF_INET && sk->sk_state != TCP_CLOSE)) {
+                    __be16 port;
+                    struct port_entry *new_port;
+                    
+                    if (sk->sk_family == AF_INET)
+                        port = inet_sk(sk)->inet_sport;
+                    else
+                        port = inet_sk(sk)->inet_sport;
+
+                    // Create new port entry
+                    new_port = kmalloc(sizeof(*new_port), GFP_ATOMIC);
+                    if (!new_port)
+                        continue;
+                    
+                    new_port->port = ntohs(port);
+                    atomic_set(&new_port->refcount, 1);
+                    list_add_tail(&new_port->list, ports_list);
+                }
+            }
+        }
+    }
+    rcu_read_unlock();
+
+    return ports_list;
+}
+
+// Helper function to free the ports list
+static void free_ports_list(struct list_head *ports_list)
+{
+    struct port_entry *entry, *tmp;
+    
+    list_for_each_entry_safe(entry, tmp, ports_list, list) {
+        list_del(&entry->list);
+        kfree(entry);
+    }
+    kfree(ports_list);
+}
+
+void check_ports(struct task_struct *task) {
+    struct port_entry *entry, *tmp;
+    struct list_head *listening_ports;
+    listening_ports = get_process_ports(task);
+
+    spin_lock(&ports_lock);
+    list_for_each_entry_safe(entry, tmp, &captured_ports, list) {
+        if (port_in_list(entry->port, listening_ports)) {
+            pr_warn("[bluerock.io filesystem_monitor] Path traversal detected by PID %d on port %d\n", task->pid, entry->port);
+            list_del(&entry->list);
+            kfree(entry);
+            break;
+        }
+    }
+    spin_unlock(&ports_lock);
+}
 
 void extract_path_variables(char __user *envp) {
     char **result = NULL;
@@ -42,14 +160,14 @@ void extract_path_variables(char __user *envp) {
     int ret;
 
     if (!envp) {
-        pr_err("Invalid environment pointer\n");
+        pr_err("[bluerock.io filesystem_monitor] Invalid environment pointer\n");
         return;
     }
 
     while (1) {
         env = kmalloc(PAGE_SIZE, GFP_KERNEL);
         if (!env) {
-            pr_err("Memory allocation failed for environment variable buffer\n");
+            pr_err("[bluerock.io filesystem_monitor] Memory allocation failed for environment variable buffer\n");
             while (count--)
                 kfree(result[count]);
             kfree(result);
@@ -57,11 +175,11 @@ void extract_path_variables(char __user *envp) {
         }
         ret = copy_from_user(env, envp, PAGE_SIZE);
         if (ret < 0) {
-            pr_err("Failed to copy environment variable from user space\n");
+            pr_err("[bluerock.io filesystem_monitor] Failed to copy environment variable from user space\n");
             kfree(env);
             break;
         }
-        pr_info("[raw]: %s\n",env);
+        pr_info("[bluerock.io filesystem_monitor] [raw]: %s\n",env);
 
         env[PAGE_SIZE - 1] = '\0';
 
@@ -81,7 +199,7 @@ void extract_path_variables(char __user *envp) {
         if (value[0] == '/' || strstr(value, "/")) {
             char **new_result = krealloc(result, sizeof(char *) * (count + 2), GFP_KERNEL);
             if (!new_result) {
-                pr_err("Memory allocation failed for result array\n");
+                pr_err("[bluerock.io filesystem_monitor] Memory allocation failed for result array\n");
                 kfree(env);
                 while (count--)
                     kfree(result[count]);
@@ -92,7 +210,7 @@ void extract_path_variables(char __user *envp) {
 
             result[count] = kstrdup(value, GFP_KERNEL);
             if (!result[count]) {
-                pr_err("Memory allocation failed for path value\n");
+                pr_err("[bluerock.io filesystem_monitor] Memory allocation failed for path value\n");
                 kfree(env);
                 while (count--)
                     kfree(result[count]);
@@ -124,7 +242,7 @@ static int read_path_pivots(char* file_path){
 
     file = filp_open(file_path, O_RDONLY, 0);
     if (IS_ERR(file)) {
-        pr_err("Failed to open file: %s\n", file_path);
+        pr_err("[bluerock.io filesystem_monitor] Failed to open file: %s\n", file_path);
         return PTR_ERR(file);
     }
 
@@ -143,7 +261,7 @@ static int read_path_pivots(char* file_path){
             if (len > 0) {
                 char **new_list = krealloc(list, (count + 1) * sizeof(char *), GFP_KERNEL);
                 if (!new_list) {
-                    pr_err("Memory allocation failed\n");
+                    pr_err("[bluerock.io filesystem_monitor] Memory allocation failed\n");
                     kfree(buffer);
                     kfree(list);
                     filp_close(file, NULL);
@@ -228,7 +346,7 @@ static char *get_path_env(void) {
 
     mm = current->mm; // Get the memory descriptor of the current thread
     if (!mm) {
-        pr_err("Failed to get mm_struct\n");
+        pr_err("[bluerock.io filesystem_monitor] Failed to get mm_struct\n");
         return NULL;
     }
 
@@ -239,20 +357,20 @@ static char *get_path_env(void) {
     // Allocate a buffer to copy environment variables
     buffer = kmalloc(ENV_BUFFER_SIZE, GFP_KERNEL);
     if (!buffer) {
-        pr_err("Failed to allocate buffer for environment variables\n");
+        pr_err("[bluerock.io filesystem_monitor] Failed to allocate buffer for environment variables\n");
         return NULL;
     }
 
     // Copy the environment variables to the buffer
-    pr_info("env_start = %lx",env_start);
+    pr_info("[bluerock.io filesystem_monitor] env_start = %lx",env_start);
     extract_path_variables((char __user *)env_start);
-    pr_info("variables count: %d\n",path_variables_count);
+    pr_info("[bluerock.io filesystem_monitor] variables count: %d\n",path_variables_count);
     for (int i = 0; i< path_variables_count; i++){
-        pr_info("ENV[%d]: %s\n",i, path_variables[i]);
+        pr_info("[bluerock.io filesystem_monitor] ENV[%d]: %s\n",i, path_variables[i]);
     }
     ret = copy_from_user(buffer, (void __user *)env_start, ENV_BUFFER_SIZE);
     if (ret < 0) {
-        pr_err("Failed to copy environment variables from user space\n");
+        pr_err("[bluerock.io filesystem_monitor] Failed to copy environment variables from user space\n");
         kfree(buffer);
         return NULL;
     }
@@ -262,7 +380,7 @@ static char *get_path_env(void) {
         if (strncmp(env_ptr, "PATH=", 5) == 0) {
             path_value = kmalloc(strlen(env_ptr) + 1, GFP_KERNEL);
             if (!path_value) {
-                pr_err("Failed to allocate memory for PATH value\n");
+                pr_err("[bluerock.io filesystem_monitor] Failed to allocate memory for PATH value\n");
                 kfree(buffer);
                 return NULL;
             }
@@ -288,16 +406,17 @@ static int pre_handler_do_sys_open(struct kprobe *p, struct pt_regs *regs) {
     filename[sizeof(filename) - 1] = '\0';
 
     do_the_magic(filename);
-    // pr_info("Filename after magic: %s\n",filename);
-    // if(strstr(filename,"war")) pr_info("[Debug] file: %s\n",filename);
+    // pr_info("[bluerock.io filesystem_monitor] Filename after magic: %s\n",filename);
+    // if(strstr(filename,"war")) pr_info("[bluerock.io filesystem_monitor] [Debug] file: %s\n",filename);
+    check_ports(current);
     if (!problematic_path(filename)){
         char *path_env = get_path_env();
         
         if (path_env) {
-            pr_info("Thread PATH: %s\n", path_env);
+            pr_info("[bluerock.io filesystem_monitor] Thread PATH: %s\n", path_env);
             kfree(path_env);
         } else {
-            // pr_info("Failed to retrieve PATH\n");
+            // pr_info("[bluerock.io filesystem_monitor] Failed to retrieve PATH\n");
         }
 
         kfree(path_env);
@@ -316,18 +435,23 @@ static struct kprobe kp_do_sys_open = {
 static int __init path_traversal_detection_init(void) {
     int ret;
     if (f_path == NULL ){
-        pr_err("Please provide configration\n");
+        pr_err("[bluerock.io filesystem_monitor] Please provide configration\n");
         return -1;
     }
+    // check if the module that initiliased capture_ports is loaded or not
+    if (!captured_ports.next || !captured_ports.prev) {
+        pr_err("[bluerock.io filesystem_monitor] Please load the netfilter_monitor module first\n");
+        return -1;
+    } 
     ret = register_kprobe(&kp_do_sys_open);
     if (ret < 0) {
-        pr_err("Failed to register kprobe: %d\n", ret);
+        pr_err("[bluerock.io filesystem_monitor] Failed to register kprobe: %d\n", ret);
         return ret;
     }
-    pr_info("Path Traversal detection module loaded.\n");
+    pr_info("[bluerock.io filesystem_monitor] File System Monitoring Module module loaded.\n");
     // reading the config
     read_path_pivots(f_path);
-    pr_info("Config file loaded.\n");
+    pr_info("[bluerock.io filesystem_monitor] Config file loaded.\n");
     return 0;
 }
 
@@ -337,7 +461,7 @@ static void __exit path_traversal_detection_exit(void) {
         kfree(path_pivots[i]);
     }
     kfree(path_pivots);
-    pr_info("Path Traversal detection module unloaded.\n");
+    pr_info("[bluerock.io filesystem_monitor] File System Monitoring Module module unloaded.\n");
 }
 
 module_init(path_traversal_detection_init);
